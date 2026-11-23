@@ -145,3 +145,7 @@ See [our AI policy in our docs](https://ashen.yasec.de/docs/ai-policy/).
 
 You can find contact information for the project at [https://ashen.yasec.de/](https://ashen.yasec.de/). For
 security-related issues, you can contact project lead jaseg at [ashen@yasec.de](mailto:ashen@yasec.de).
+
+## Funding
+
+This project has been funded by [Prototype Fund](https://www.prototypefund.de/) as part of the [ashen project](https://www.prototypefund.de/projects/ashen).
