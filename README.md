@@ -63,7 +63,7 @@ $ adb forward tcp:3333 tcp:3333 && adb shell arduino-debug
 
 You then call gdb with instructions to connect to that port, and to load the firmware elf binary. 
 
-> [!HINT]
+> [!NOTE]
 > On your system, the ARM gdb binary might have a different name. If you can't find an `arm-none-eabi-gdb`, one built
 > for `arm-linux-gnueabi` will probably also work.
 
@@ -78,7 +78,7 @@ $ arm-none-eabi-gdb result/bin/ashen-fw \
 
 ### Development and testing
 
-> [!HINT]
+> [!NOTE]
 > The code in this repo was written using an LLM. Most of the tests were LLM-generated with minimal human supervision,
 > while the remainder of the firmware was LLM-generated with close human supervision. Proceed reading this code with
 > caution. If you find parts of it hard to read, or inelegant, please open an issue [on
