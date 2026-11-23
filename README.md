@@ -1,29 +1,36 @@
 # Ashen Firmware
 
-Firmware for a custom STM32G474RB-based board, written in Rust using
-[Embassy](https://embassy.dev/).
+This repository contains ashen tamper sensor firmware, based on [embassy-rs](https://embassy.dev/). This firmware is
+mean to run on a microcontroller connected to the `ashen-linux` system to monitor connected physical tamper sensors such
+as tamper-sensing meshes, and alert the linux system when a tampering attempt is detected. The linux system and this
+firmware communicate through a noise-based [noise](https://noiseprotocol.org/)-based heartbeat protocol.
 
-On boot it blinks the status LED on PA5 and brings up an authenticated,
-COBS-framed [Noise](https://noiseprotocol.org/) link over UART (see
-[Secure Link](#secure-link)). The core COBS codec is formally verified with
-[Verus](https://github.com/verus-lang/verus) (see
-[Formal Verification](#formal-verification)).
+The linux kernel side of this protocol can be found in the [ashen-linux](https://github.com/yasec-de/ashen-linux)
+repository.
+
+On top of the basic heartbeat protocol and at this point simple, GPIO-based tamper sensing, this firmware embeds
+[WolfTPM](https://github.com/yasec-de/ashen-linux), a firmware TPM 2.0 (fTPM) implementation. TPM messages are tunneled
+to the host besides the heartbeat traffic through the encrypted heartbeat link. On an alarm, `ashen-firmware` notifies
+the host, and then deletes the fTPM's root secrets along with the heartbeat link's encryption and authentication keys.
+
+Intende use of the fTPM feature is easy disk encryption on the host without requiring additional drivers or tools apart
+from the ashen driver.
 
 ## Building and Flashing
 
 ### Prerequisites
 
-Software: Install Nix and enable flages
-Hardware: STM32G474RB devboard, USB UART adapter, and ST-Link/V2 or compatible SWD debugger
+Software: Install nix and enable flakes
+Hardware: A single arduino Uno Q that will run both `ashen-linux` on its linux SoC and `ashen-firmware` on its on-board
+STM32 microcontroller.
 
 ### Build
 
 ```bash
-nix build            # cross-compiled firmware ELF -> result/bin/ashen-fw
+nix build # cross-compiles firmware ELF to result/bin/ashen-fw
 ```
 
-The flake pins the Rust toolchain (`rust-toolchain.toml`) and all build tools,
-so Cargo is run through the dev shell rather than a system-wide install:
+You can run the pinned rust toolchain manually through a nix dev shell:
 
 ```bash
 nix develop -c cargo build --release --features embedded --target thumbv7em-none-eabihf
@@ -31,28 +38,64 @@ nix develop -c cargo build --release --features embedded --target thumbv7em-none
 
 ### Flash
 
-Flashing uses Cargo's runner configuration, which invokes
-`probe-rs run --chip STM32G474RB` after building (configured in
-`.cargo/config.toml`):
+The easiest way to flash the on-board STM32 on the uno q is through gdb running on your local computer, connected to the
+uno q through either adb or ssh. First, you need to start the `arduino-debug` tool that is part of the uno q's stock OS.
+This tool wraps [`openocd`](https://openocd.org/) and on launch will expose a `gdb` protocol interface for debugging and
+programming on `localhost`. You then forward this gdb port to your development machine that will later be running
+openocd.
 
-```bash
-nix develop -c cargo run --release --features embedded --target thumbv7em-none-eabihf
+> [!TIP]
+> We aren't using arduino's Zephyr-based core runtime on the STM32, so the arduino-flash script that's shipped by
+> arduino with the uno q won't work.
+
+
+Using SSH to access the uno q:
+
+```shell
+$ ssh root@[your uno q] -L 3333:localhost:3333 arduino-debug
 ```
 
-### Development
+Using ADB over USB instead:
+
+```shell
+$ adb forward tcp:3333 tcp:3333 && adb shell arduino-debug
+```
+
+You then call gdb with instructions to connect to that port, and to load the firmware elf binary. 
+
+> [!HINT]
+> On your system, the ARM gdb binary might have a different name. If you can't find an `arm-none-eabi-gdb`, one built
+> for `arm-linux-gnueabi` will probably also work.
+
+```shell
+$ arm-none-eabi-gdb result/bin/ashen-fw \
+  -ex 'target extended-remote localhost:3333' \
+  -ex "monitor reset halt" \
+  -ex "load" \
+  -ex "monitor reset run" \
+  -ex "detach"
+```
+
+### Development and testing
+
+> [!HINT]
+> The code in this repo was written using an LLM. Most of the tests were LLM-generated with minimal human supervision,
+> while the remainder of the firmware was LLM-generated with close human supervision. Proceed reading this code with
+> caution. If you find parts of it hard to read, or inelegant, please open an issue [on
+> github](https://github.com/yasec-de/ashen-issues/issues). We consider the smells of LLM-generated code such as
+> overcomplicated logic, useless comments, and excessive exception handling code issues that we want to correct.
+>
+> Like in other parts of ashen, all standalone documentation (so docs outside some comments inside the source files) is
+> fully human-written. See [our AI policy in our docs](https://ashen.yasec.de/docs/ai-policy/).
 
 ```bash
 nix develop  # Enter the development shell with all tools, then:
 
 cargo build --release --features embedded --target thumbv7em-none-eabihf
-cargo run   --release --features embedded --target thumbv7em-none-eabihf
-cargo test                                 # host-side tests (see Secure Link)
-cargo doc --open --no-deps
-nix fmt                                    # Format all code (Rust, Nix, etc.)
 ```
 
-The shell also provides the [Verus](https://github.com/verus-lang/verus)
-verifier and Cargo helpers (`cargo-expand`, `cargo-bloat`, `cargo-binutils`).
+You can use gdb as described above not just for flashing but also for full debugging. The MCU has support for hardware
+breakpoints and data watchpoints.
 
 For automatic environment activation, use direnv:
 ```bash
@@ -60,107 +103,45 @@ echo "use flake" > .envrc
 direnv allow
 ```
 
-## Secure Link
+#### Secure Link Tests
 
-[`src/noise_link.rs`](src/noise_link.rs) implements a Noise_XX handshake
-(trust-on-first-use of the remote static key) over a byte transport, with
-an authenticated echo loop once the handshake completes. Messages are
-framed by a variable-length, formally verified COBS codec
-([`src/cobs.rs`](src/cobs.rs)) wrapped in a frame I/O layer
-([`src/framing.rs`](src/framing.rs)). Frames are delimited by `0x00`; if a
-frame is malformed, the implementation resynchronizes by discarding bytes
-up to the next delimiter and continuing with the next frame.
-
-The link is built as part of the `ashen_fw` library so it can be
-exercised on the host:
+A unit test that tests the [noise](https://noiseprotocol.org/)-based heartbeat protocol on the host can be run like
+this:
 
 ```bash
 nix develop -c cargo test
 ```
 
-This builds the link implementation for the host, sets up an in-memory
-duplex transport, runs the handshake, performs echo round trips
-(including a multi-frame ~513-byte payload), and exercises frame
-resynchronization. The `embedded` feature (off by
-default) gates the firmware binary and its embedded-only dependencies,
-which require the `thumbv7em-none-eabihf` target.
+#### Formal Verification
 
-## Formal Verification
+The heartbeat link uses [Consistent Overhead Byte Stuffing
+(COBS)](https://en.wikipedia.org/wiki/Consistent_Overhead_Byte_Stuffing) as its framing protocol. Since we wrote this
+critical part of the protocol machinery ourselves, it has been verified using a formal proof in
+[Verus](https://github.com/verus-lang/verus). The same file is compiled into the firmware and checked by the verifier.
 
-The core COBS codec in [`src/cobs.rs`](src/cobs.rs) is formally verified with
-[Verus](https://github.com/verus-lang/verus). The *same* file is compiled into
-the firmware and checked by the verifier — a normal `cargo build` erases the
-proof annotations, so there is no separate, drifting copy. The frame I/O layer
-that depends on the async/transport crates lives apart in
-[`src/framing.rs`](src/framing.rs) to keep the verified file dependency-light.
-
-Verified properties:
+The verified properties are:
 
 - `encode` never emits a `0x00` byte, so `0x00` is an unambiguous frame
   delimiter;
 - `decode` never panics, never overflows, and never indexes out of bounds on
   zero-free input (the bytes it sees off the wire);
-- round trip — `decode(encode(s)) == Ok(s)` for every input `s`.
+- Decoding and encoding are correct: `decode(encode(s)) == Ok(s)` for every input `s`.
 
-Run the proof:
+Running the proof:
 
 ```bash
-nix build .#cobs-proof          # runs Verus in the sandbox; fails on regression
-# or, inside the dev shell:
 nix develop -c verus --crate-type=lib src/cobs.rs
-```
-
-Verus ships an x86_64-linux prebuilt only, so the `verus` and `cobs-proof`
-flake outputs are available on x86_64-linux.
-
-## Debug Mode
-
-The `debug-mode` Cargo feature is reserved for enabling more verbose
-logging and debug-friendly clock configurations as the firmware grows:
-
-```bash
-nix develop -c cargo run --release --features debug-mode
-```
-
-## Project Structure
-
-```
-ashen-fw/
-├── .github/workflows/ci.yml      # CI configuration
-├── src/
-│   ├── main.rs                   # Firmware entry point (`embedded` feature)
-│   ├── lib.rs                    # Host-testable library root
-│   ├── cobs.rs                   # Formally verified COBS codec (Verus)
-│   ├── framing.rs                # COBS frame I/O over a byte transport
-│   ├── noise_link.rs             # Noise_XX secure link
-│   ├── protocol.rs               # Application request/response protocol
-│   ├── flash_keystore.rs         # Persisted remote static key (embedded-only)
-│   ├── hw_rng.rs                 # RNG peripheral driver (embedded-only)
-│   ├── log.rs                    # plain-text logging over a byte pipe
-│   ├── panic_link.rs             # Panic reporting over the link (embedded-only)
-│   └── test_util.rs              # Host-side test helpers
-├── nix/
-│   ├── packages/ashen-fw.nix     # Firmware build derivation
-│   ├── packages/cobs-proof.nix   # Verus COBS proof as a build step
-│   ├── packages/verus.nix        # Pinned Verus toolchain
-│   ├── devShells.nix             # Development environment
-│   ├── overlays.nix              # Rust overlay composition
-│   └── formatter.nix             # treefmt configuration
-├── flake.nix                     # Flake entry point
-├── rust-toolchain.toml           # Rust toolchain specification
-└── .cargo/config.toml            # Build target and probe-rs runner
 ```
 
 ## License
 
-MIT
+GPL-3.0
 
-## References
+## AI Policy
 
-- [Embassy Documentation](https://embassy.dev/)
-- [Verus](https://github.com/verus-lang/verus)
-- [Noise Protocol Framework](https://noiseprotocol.org/)
-- [Nix Flakes](https://nixos.wiki/wiki/Flakes)
-- [rust-overlay](https://github.com/oxalica/rust-overlay)
-- [probe-rs](https://probe.rs/)
-- [STM32G4 Reference Manual](https://www.st.com/resource/en/reference_manual/rm0440-stm32g4-series-advanced-armbased-32bit-mcus-stmicroelectronics.pdf)
+See [our AI policy in our docs](https://ashen.yasec.de/docs/ai-policy/).
+
+## Contact
+
+You can find contact information for the project at [https://ashen.yasec.de/](https://ashen.yasec.de/). For
+security-related issues, you can contact project lead jaseg at [ashen@yasec.de](mailto:ashen@yasec.de).
