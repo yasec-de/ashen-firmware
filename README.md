@@ -1,3 +1,8 @@
+
+<p align="center">
+    <img alt="ashen logo showing a stylized flame in a red circle" width="100px" src="./ashen-logo-color-no-transparency.png">
+</p>
+
 # Ashen Firmware
 
 This repository contains ashen tamper sensor firmware, based on [embassy-rs](https://embassy.dev/). This firmware is
